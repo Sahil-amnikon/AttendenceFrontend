@@ -1,281 +1,417 @@
-import { useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
 import "./index.css";
 
+const API_URL = "https://localhost:7297/api/Attendance";
+const REFRESH_INTERVAL = 30000;
+
+function calculateDuration(inTime, outTime) {
+  if (!inTime || !outTime) return "--";
+
+  const start = new Date(inTime);
+  const end = new Date(outTime);
+
+  if (
+    Number.isNaN(start.getTime()) ||
+    Number.isNaN(end.getTime()) ||
+    end < start
+  ) {
+    return "--";
+  }
+
+  const totalMinutes = Math.floor((end - start) / 60000);
+
+  if (totalMinutes < 1) return "Less than 1 min";
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) return `${minutes} mins`;
+  if (minutes === 0) return `${hours} hr${hours === 1 ? "" : "s"}`;
+
+  return `${hours} hr${hours === 1 ? "" : "s"} ${minutes} mins`;
+}
+
+function normalizeRecord(record) {
+  const employeeId = String(
+    record.personPin ??
+      record.PersonPin ??
+      record.employeeId ??
+      record.EmployeeId ??
+      ""
+  ).trim();
+
+  const rawName =
+    record.employeeName ??
+    record.EmployeeName ??
+    record.name ??
+    record.Name ??
+    "";
+
+  const inTime = record.inTime ?? record.InTime ?? null;
+  const outTime = record.outTime ?? record.OutTime ?? null;
+
+  const eventTime =
+    record.eventTime ??
+    record.EventTime ??
+    inTime ??
+    outTime ??
+    null;
+
+  const doorName = record.doorName ?? record.DoorName ?? "";
+
+  const apiDuration =
+    record.totalHours ??
+    record.TotalHours ??
+    record.totalTime ??
+    record.TotalTime ??
+    "";
+
+  return {
+    employeeId,
+    employeeName: typeof rawName === "string" ? rawName.trim() : "",
+    inTime,
+    outTime,
+    eventTime,
+    doorName: String(doorName).trim(),
+    totalHours: apiDuration || calculateDuration(inTime, outTime),
+    direction: record.direction ?? record.Direction ?? "",
+  };
+}
+
+function formatDateTime(value) {
+  if (!value) return "--";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+
+  return date.toLocaleString([], {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function getDateKey(value) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function formatExportDate(value) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return getDateKey(date);
+}
+
+function formatExportTime(value) {
+  if (!value) return "";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function escapeCSV(value) {
+  let text = String(value ?? "");
+
+  // Prevent Excel from interpreting untrusted text as a formula.
+  if (/^[=+\-@\t\r]/.test(text)) {
+    text = "'" + text;
+  }
+
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 function App() {
-
-  // Dummy data for now
-  // Later this will come from your database/API
-  const employees = [
-    {
-      empId: 101,
-      empName: "Rahul",
-      in: "09:02 AM",
-      out: "06:05 PM",
-      totalHours: "09:03",
-      door: "Main",
-      status: "Present",
-      date: "08 Oct 2026"
-    },
-    {
-      empId: 102,
-      empName: "Amit",
-      in: "09:15 AM",
-      out: "06:20 PM",
-      totalHours: "09:05",
-      door: "Masjid",
-      status: "Present",
-      date: "08 Oct 2026"
-    },
-    {
-      empId: 103,
-      empName: "Priya",
-      in: "08:55 AM",
-      out: "05:45 PM",
-      totalHours: "08:50",
-      door: "Server",
-      status: "Present",
-      date: "08 Oct 2026"
-    },
-    {
-      empId: 104,
-      empName: "Neha",
-      in: "09:05 AM",
-      out: "06:10 PM",
-      totalHours: "09:05",
-      door: "Main",
-      status: "Present",
-      date: "08 Oct 2026"
-    },
-    {
-      empId: 105,
-      empName: "Rohit",
-      in: "--",
-      out: "--",
-      totalHours: "--",
-      door: "Masjid",
-      status: "Absent",
-      date: "08 Oct 2026"
-    },
-    {
-      empId: 106,
-      empName: "Sneha",
-      in: "--",
-      out: "--",
-      totalHours: "--",
-      door: "Server",
-      status: "Absent",
-      date: "08 Oct 2026"
-    }
-  ];
-
-
+  const [records, setRecords] = useState([]);
   const [search, setSearch] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedDoor, setSelectedDoor] = useState("All Doors");
-  const [selectedList, setSelectedList] = useState(null);
-
-  // Attendance / Recent Activity
+  const [selectedDate, setSelectedDate] = useState("");
   const [activeSection, setActiveSection] = useState("attendance");
 
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
 
-  // Search by ID or Name + Door filter
-  const filteredEmployees = employees.filter((employee) => {
+  // Load attendance data and refresh every 30 seconds.
+  useEffect(() => {
+    let cancelled = false;
 
-    const searchValue = search.toLowerCase();
+    async function loadAttendance() {
+      try {
+        const response = await fetch(API_URL, {
+          headers: { Accept: "application/json" },
+        });
 
-    const matchesSearch =
-      employee.empName.toLowerCase().includes(searchValue) ||
-      employee.empId.toString().includes(searchValue);
+        if (!response.ok) {
+          throw new Error(`API request failed: ${response.status}`);
+        }
 
-    const matchesDoor =
-      selectedDoor === "All Doors" ||
-      employee.door === selectedDoor;
+        const data = await response.json();
 
-    return matchesSearch && matchesDoor;
-  });
+        if (!Array.isArray(data)) {
+          throw new Error("The attendance API did not return a list.");
+        }
 
-
-  const totalEmployees = employees.length;
-
-  const presentEmployees = employees.filter(
-    (employee) => employee.status === "Present"
-  );
-
-  const absentEmployees = employees.filter(
-    (employee) => employee.status === "Absent"
-  );
-
-
-  // Recent Activity
-  const events = [
-    {
-      empId: 101,
-      time: "09:02 AM",
-      employee: "Rahul",
-      action: "Entered",
-      door: "Main"
-    },
-    {
-      empId: 102,
-      time: "09:15 AM",
-      employee: "Amit",
-      action: "Entered",
-      door: "Masjid"
-    },
-    {
-      empId: 103,
-      time: "08:55 AM",
-      employee: "Priya",
-      action: "Entered",
-      door: "Server"
-    },
-    {
-      empId: 104,
-      time: "09:05 AM",
-      employee: "Neha",
-      action: "Entered",
-      door: "Main"
+        if (!cancelled) {
+          setRecords(data.map(normalizeRecord));
+          setError("");
+          setLastUpdated(new Date());
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            `Could not load attendance: ${err.message}. Check that the backend is running and the API URL is correct.`
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     }
-  ];
 
+    loadAttendance();
+
+    const intervalId = setInterval(loadAttendance, REFRESH_INTERVAL);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, []);
+
+  // Build a unique employee list for search suggestions.
+  const employees = useMemo(() => {
+    const employeeMap = new Map();
+
+    records.forEach((record) => {
+      if (!record.employeeId) return;
+
+      const existing = employeeMap.get(record.employeeId);
+
+      employeeMap.set(record.employeeId, {
+        id: record.employeeId,
+        name: record.employeeName || existing?.name || "Unknown",
+      });
+    });
+
+    return Array.from(employeeMap.values()).sort((a, b) =>
+      a.id.localeCompare(b.id, undefined, { numeric: true })
+    );
+  }, [records]);
+
+  // Show employee suggestions when searching by PIN or name.
+  const searchSuggestions = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    if (!query) return [];
+
+    return employees
+      .filter(
+        (employee) =>
+          employee.id.toLowerCase().includes(query) ||
+          employee.name.toLowerCase().includes(query)
+      )
+      .slice(0, 8);
+  }, [search, employees]);
+
+  // Apply employee, door, and date filters.
+  const filteredRecords = useMemo(() => {
+    const searchValue = search.trim().toLowerCase();
+
+    return records.filter((record) => {
+      const name = record.employeeName.toLowerCase();
+      const id = record.employeeId.toLowerCase();
+      const door = record.doorName.toLowerCase();
+
+      const matchesSearch =
+        name.includes(searchValue) || id.includes(searchValue);
+
+      const matchesDoor =
+        selectedDoor === "All Doors" ||
+        door.includes(selectedDoor.toLowerCase());
+
+      const dateForFilter =
+        record.inTime || record.outTime || record.eventTime;
+
+      const matchesDate =
+        !selectedDate || getDateKey(dateForFilter) === selectedDate;
+
+      return matchesSearch && matchesDoor && matchesDate;
+    });
+  }, [records, search, selectedDoor, selectedDate]);
+
+  const uniqueEmployees = useMemo(
+    () =>
+      new Set(records.map((record) => record.employeeId).filter(Boolean))
+        .size,
+    [records]
+  );
+
+  // Export records currently shown after applying the filters.
+  function exportEmployeeSummary() {
+    if (filteredRecords.length === 0) {
+      alert("No attendance records available to export.");
+      return;
+    }
+
+    const headers = [
+      "Employee ID (PIN)",
+      "Employee Name",
+      "Date",
+      "In Time",
+      "Out Time",
+      "Door Name",
+      "Total Working Hours",
+    ];
+
+    const sortedRecords = [...filteredRecords].sort((a, b) => {
+      const timeA = new Date(
+        a.inTime || a.eventTime || a.outTime || 0
+      ).getTime();
+
+      const timeB = new Date(
+        b.inTime || b.eventTime || b.outTime || 0
+      ).getTime();
+
+      return timeA - timeB;
+    });
+
+    const rows = sortedRecords.map((record) => [
+      record.employeeId,
+      record.employeeName || "Unknown",
+      formatExportDate(
+        record.inTime || record.eventTime || record.outTime
+      ),
+      formatExportTime(record.inTime),
+      formatExportTime(record.outTime),
+      record.doorName,
+      record.totalHours || calculateDuration(record.inTime, record.outTime),
+    ]);
+
+    const csvContent =
+      "\uFEFF" +
+      [headers, ...rows]
+        .map((row) => row.map(escapeCSV).join(","))
+        .join("\r\n");
+
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    const employeeIds = [
+      ...new Set(sortedRecords.map((record) => record.employeeId).filter(Boolean)),
+    ];
+
+    const fileName =
+      employeeIds.length === 1
+        ? `Attendance_${employeeIds[0]}.csv`
+        : "Attendance_Filtered_Records.csv";
+
+    link.href = downloadUrl;
+    link.download = fileName;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+  }
 
   return (
     <div className="app">
-
-
-      {/* ================= SIDEBAR ================= */}
-
       <aside className="sidebar">
-
         <h2>Attendance</h2>
 
         <nav>
-
-          <div className="menu-item active">
+          <div
+            className={
+              activeSection === "attendance"
+                ? "menu-item active"
+                : "menu-item"
+            }
+            onClick={() => setActiveSection("attendance")}
+          >
             Dashboard
           </div>
 
-          <div className="menu-item">
-            Attendance
+          <div
+            className={
+              activeSection === "activity"
+                ? "menu-item active"
+                : "menu-item"
+            }
+            onClick={() => setActiveSection("activity")}
+          >
+            Recent Activity
           </div>
-
-          <div className="menu-item">
-            Employees
-          </div>
-
-          <div className="menu-item">
-            Events
-          </div>
-
         </nav>
-
       </aside>
 
-
-      {/* ================= MAIN CONTENT ================= */}
-
       <main className="main-content">
-
-
-        {/* ================= HEADER ================= */}
-
-        <div className="header">
-
+        <header className="header">
           <div>
+            <h1>Attendance Dashboard</h1>
+            <p>Attendance events from the company database</p>
 
-            <h1>Dashboard</h1>
-
-            <p>
-              Employee Attendance Overview
-            </p>
-
+            <small>
+              {lastUpdated
+                ? `Last updated: ${lastUpdated.toLocaleTimeString()}`
+                : "Waiting for attendance data..."}
+            </small>
           </div>
 
           <div className="current-date">
-            08 October 2026
+            {new Date().toLocaleDateString()}
           </div>
-
-        </div>
-
-
-        {/* ================= SUMMARY CARDS ================= */}
+        </header>
 
         <div className="cards">
-
-
-          {/* TOTAL EMPLOYEES */}
-
-          <div
-            className="card card-total clickable"
-            onClick={() => setSelectedList("Total Employees")}
-          >
-
-            <h3>
-              Total Employees
-            </h3>
-
-            <p>
-              {totalEmployees}
-            </p>
-
-            <span>
-              View employee list →
-            </span>
-
+          <div className="card card-total">
+            <h3>Recent Records</h3>
+            <p>{records.length}</p>
+            <span>Loaded attendance visits</span>
           </div>
 
-
-          {/* PRESENT */}
-
-          <div
-            className="card card-present clickable"
-            onClick={() => setSelectedList("Present Today")}
-          >
-
-            <h3>
-              Present Today
-            </h3>
-
-            <p>
-              {presentEmployees.length}
-            </p>
-
-            <span>
-              View present employees →
-            </span>
-
+          <div className="card card-present">
+            <h3>Employees in Records</h3>
+            <p>{uniqueEmployees}</p>
+            <span>Unique employee IDs</span>
           </div>
 
-
-          {/* ABSENT */}
-
-          <div
-            className="card card-absent clickable"
-            onClick={() => setSelectedList("Absent Today")}
-          >
-
-            <h3>
-              Absent Today
-            </h3>
-
-            <p>
-              {absentEmployees.length}
-            </p>
-
-            <span>
-              View absent employees →
-            </span>
-
+          <div className="card card-absent">
+            <h3>Filtered Records</h3>
+            <p>{filteredRecords.length}</p>
+            <span>Records matching your filters</span>
           </div>
-
         </div>
 
-
-        {/* ================= ATTENDANCE / RECENT ACTIVITY ================= */}
-
         <div className="section-title">
-
           <div className="section-tabs">
-
             <button
               className={
                 activeSection === "attendance"
@@ -287,7 +423,6 @@ function App() {
               Attendance Records
             </button>
 
-
             <button
               className={
                 activeSection === "activity"
@@ -298,319 +433,252 @@ function App() {
             >
               Recent Activity
             </button>
-
           </div>
-
         </div>
 
+        {error && (
+          <p className="error-message" role="alert">
+            {error}
+          </p>
+        )}
 
-        {/* ================= ATTENDANCE RECORDS ================= */}
-
-        {activeSection === "attendance" && (
-
+        {loading ? (
+          <p>Loading attendance records...</p>
+        ) : (
           <>
+            {activeSection === "attendance" && (
+              <>
+                <div className="filter-section">
+                  <div className="search-wrapper">
+                    <input
+                      className="employee-search"
+                      type="text"
+                      placeholder="Search by employee ID or name..."
+                      value={search}
+                      onChange={(event) => {
+                        setSearch(event.target.value);
+                        setShowSuggestions(true);
+                      }}
+                      onFocus={() => setShowSuggestions(true)}
+                      onBlur={() => {
+                        window.setTimeout(
+                          () => setShowSuggestions(false),
+                          150
+                        );
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          setShowSuggestions(false);
+                        }
 
-            <div className="section-title">
+                        if (
+                          event.key === "Enter" &&
+                          searchSuggestions.length > 0
+                        ) {
+                          const employee = searchSuggestions[0];
+                          setSearch(employee.id);
+                          setShowSuggestions(false);
+                          event.preventDefault();
+                        }
+                      }}
+                      autoComplete="off"
+                      aria-label="Search attendance by employee ID or name"
+                      aria-expanded={
+                        showSuggestions && search.trim().length > 0
+                      }
+                    />
 
-              <div>
+                    {showSuggestions && search.trim() && (
+                      <div className="search-suggestions">
+                        {searchSuggestions.length > 0 ? (
+                          searchSuggestions.map((employee) => (
+                            <button
+                              type="button"
+                              className="search-suggestion"
+                              key={employee.id}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => {
+                                setSearch(employee.id);
+                                setShowSuggestions(false);
+                              }}
+                            >
+                              <span className="suggestion-id">
+                                {employee.id}
+                              </span>
 
-                <p>
-                  Search employees by ID or name
-                </p>
+                              <span className="suggestion-name">
+                                {employee.name}
+                              </span>
+                            </button>
+                          ))
+                        ) : (
+                          <div className="no-suggestions">
+                            No matching employees found
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-              </div>
-
-            </div>
-
-
-            {/* SEARCH + DOOR FILTER */}
-
-            <div className="filter-section">
-
-              <input
-                type="text"
-                placeholder="Search by employee ID or name..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-
-
-              <select
-                value={selectedDoor}
-                onChange={(e) => setSelectedDoor(e.target.value)}
-              >
-
-                <option value="All Doors">
-                  All Doors
-                </option>
-
-                <option value="Main">
-                  Main
-                </option>
-
-                <option value="Masjid">
-                  Masjid
-                </option>
-
-                <option value="Server">
-                  Server
-                </option>
-
-              </select>
-
-            </div>
-
-
-            {/* ATTENDANCE TABLE */}
-
-            <div className="table-container">
-
-              <table>
-
-                <thead>
-
-                  <tr>
-
-                    <th>
-                      Emp ID
-                    </th>
-
-                    <th>
-                      Employee Name
-                    </th>
-
-                    <th>
-                      IN
-                    </th>
-
-                    <th>
-                      OUT
-                    </th>
-
-                    <th>
-                      Total Working Hours
-                    </th>
-
-                    <th>
-                      Door
-                    </th>
-
-                    <th>
-                      Status
-                    </th>
-
-                  </tr>
-
-                </thead>
-
-
-                <tbody>
-
-                  {filteredEmployees.length > 0 ? (
-
-                    filteredEmployees.map((employee) => (
-
-                      <tr key={employee.empId}>
-
-                        <td>
-                          {employee.empId}
-                        </td>
-
-                        <td className="employee-name">
-                          {employee.empName}
-                        </td>
-
-                        <td>
-                          {employee.in}
-                        </td>
-
-                        <td>
-                          {employee.out}
-                        </td>
-
-                        <td>
-                          {employee.totalHours}
-                        </td>
-
-                        <td>
-                          {employee.door}
-                        </td>
-
-                        <td>
-
-                          <span
-                            className={
-                              employee.status === "Present"
-                                ? "status present"
-                                : "status absent"
-                            }
-                          >
-
-                            {employee.status}
-
-                          </span>
-
-                        </td>
-
-                      </tr>
-
-                    ))
-
-                  ) : (
-
-                    <tr>
-
-                      <td
-                        colSpan="7"
-                        className="no-data"
+                    <label
+                      htmlFor="attendance-date"
+                      className="calendar-icon"
+                      title="Filter by date"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
                       >
-                        No employee found
-                      </td>
+                        <rect
+                          x="3"
+                          y="5"
+                          width="18"
+                          height="16"
+                          rx="2"
+                        />
+                        <path d="M16 3v4M8 3v4M3 11h18" />
+                      </svg>
+                    </label>
 
-                    </tr>
-
-                  )}
-
-                </tbody>
-
-              </table>
-
-            </div>
-
-          </>
-
-        )}
-
-
-        {/* ================= RECENT ACTIVITY ================= */}
-
-        {activeSection === "activity" && (
-
-          <div className="events-container">
-
-            {/* ACTIVITY HEADER */}
-
-            <div className="event event-header">
-
-              <div className="event-id">
-                Emp ID
-              </div>
-
-              <div className="event-name">
-                Employee Name
-              </div>
-
-              <div className="event-time">
-                IN Time
-              </div>
-
-            </div>
-
-
-            {/* ACTIVITY DATA */}
-
-            {events.map((event, index) => (
-
-              <div
-                className="event"
-                key={index}
-              >
-
-                <div className="event-id">
-                  {event.empId}
-                </div>
-
-                <div className="event-name">
-                  {event.employee}
-                </div>
-
-                <div className="event-time">
-                  {event.time}
-                </div>
-
-              </div>
-
-            ))}
-
-          </div>
-
-        )}
-
-
-      </main>
-
-
-      {/* ================= POPUP LIST ================= */}
-
-      {selectedList && (
-
-        <div
-          className="modal-overlay"
-          onClick={() => setSelectedList(null)}
-        >
-
-          <div
-            className="modal"
-            onClick={(e) => e.stopPropagation()}
-          >
-
-            <div className="modal-header">
-
-              <h2>
-                {selectedList}
-              </h2>
-
-              <button
-                onClick={() => setSelectedList(null)}
-              >
-                ×
-              </button>
-
-            </div>
-
-
-            <div className="modal-list">
-
-              {(selectedList === "Total Employees"
-                ? employees
-                : selectedList === "Present Today"
-                ? presentEmployees
-                : absentEmployees
-              ).map((employee) => (
-
-                <div
-                  className="employee-row"
-                  key={employee.empId}
-                >
-
-                  <div>
-
-                    <strong>
-                      {employee.empName}
-                    </strong>
-
-                    <span>
-                      Employee ID: {employee.empId}
-                    </span>
-
+                    <input
+                      id="attendance-date"
+                      className="hidden-date-input"
+                      type="date"
+                      value={selectedDate}
+                      onChange={(event) =>
+                        setSelectedDate(event.target.value)
+                      }
+                      aria-label="Filter attendance by date"
+                    />
                   </div>
 
-                  <span>
-                    {employee.status}
-                  </span>
+                  <select
+                    className="door-select"
+                    value={selectedDoor}
+                    onChange={(event) => setSelectedDoor(event.target.value)}
+                  >
+                    <option value="All Doors">All Doors</option>
+                    <option value="Main">Main</option>
+                    <option value="Masjid">Masjid</option>
+                    <option value="Server">Server</option>
+                  </select>
 
+                  <button
+                    type="button"
+                    className="export-button"
+                    onClick={exportEmployeeSummary}
+                    disabled={filteredRecords.length === 0}
+                  >
+                    Export to Excel
+                  </button>
+
+                  {selectedDate && (
+                    <button
+                      type="button"
+                      className="clear-date"
+                      onClick={() => setSelectedDate("")}
+                    >
+                      Clear date
+                    </button>
+                  )}
                 </div>
 
-              ))}
+                {selectedDate && (
+                  <p className="selected-date-label">
+                    Showing records for{" "}
+                    <strong>
+                      {new Date(
+                        `${selectedDate}T12:00:00`
+                      ).toLocaleDateString()}
+                    </strong>
+                  </p>
+                )}
 
-            </div>
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Emp ID</th>
+                        <th>Employee Name</th>
+                        <th>In Time</th>
+                        <th>Out Time</th>
+                        <th>Door</th>
+                        <th>Total Hours</th>
+                      </tr>
+                    </thead>
 
-          </div>
+                    <tbody>
+                      {filteredRecords.map((record, index) => (
+                        <tr
+                          key={`${record.employeeId}-${record.eventTime}-${record.doorName}-${index}`}
+                        >
+                          <td>{record.employeeId || "--"}</td>
+                          <td>{record.employeeName || "--"}</td>
+                          <td>{formatDateTime(record.inTime)}</td>
+                          <td>{formatDateTime(record.outTime)}</td>
+                          <td>{record.doorName || "--"}</td>
+                          <td>{record.totalHours || "--"}</td>
+                        </tr>
+                      ))}
 
-        </div>
+                      {filteredRecords.length === 0 && (
+                        <tr>
+                          <td colSpan="6" className="no-data">
+                            No attendance records found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
 
-      )}
+            {activeSection === "activity" && (
+              <div className="events-container">
+                <div className="event event-header">
+                  <div className="event-id">Emp ID</div>
+                  <div className="event-name">Employee Name</div>
+                  <div className="event-time">Event Time</div>
+                </div>
 
+                {records.map((record, index) => (
+                  <div
+                    className="event"
+                    key={`${record.employeeId}-${record.eventTime}-${index}`}
+                  >
+                    <div className="event-id">
+                      {record.employeeId || "--"}
+                    </div>
+
+                    <div className="event-name">
+                      {record.employeeName || "Unknown"}
+                      <small>
+                        {" "}• {record.doorName || "Unknown door"}
+                        {" "}• {record.totalHours || "Duration pending"}
+                      </small>
+                    </div>
+
+                    <div className="event-time">
+                      {formatDateTime(record.eventTime)}
+                    </div>
+                  </div>
+                ))}
+
+                {records.length === 0 && (
+                  <p className="no-data">No recent activity found.</p>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </main>
     </div>
   );
 }
